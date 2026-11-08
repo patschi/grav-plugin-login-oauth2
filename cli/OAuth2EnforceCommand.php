@@ -5,7 +5,9 @@ namespace Grav\Plugin\Console;
 use Grav\Common\Filesystem\Folder;
 use Grav\Common\Grav;
 use Grav\Console\ConsoleCommand;
+use Grav\Plugin\Login\Login;
 use Grav\Plugin\Login\OAuth2\Console\Settings;
+use Grav\Plugin\Login\OAuth2\OAuth2;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Style\SymfonyStyle;
@@ -24,16 +26,22 @@ class OAuth2EnforceCommand extends ConsoleCommand
             ->addOption('site', null, InputOption::VALUE_NONE, 'Only the site')
             ->addOption('admin', null, InputOption::VALUE_NONE, 'Only the admin')
             ->addOption('force', 'f', InputOption::VALUE_NONE, 'Turn it on even if it wouldn\'t apply yet (no active provider) or a setting it requires off is on')
+            ->addOption('sign-out', null, InputOption::VALUE_NONE, 'With on: sign out the users who could have logged in without OAuth2 (everyone for the site, accounts with admin access for the admin)')
             ->setDescription("Turns 'Enforce OAuth2' on or off, e.g. when locked out")
             ->setHelp(
                 "The <info>enforce-oauth2</info> command turns 'Enforce OAuth2' (only OAuth2 logins) on or off, for the site and the admin.\n\n" .
                 "  <info>bin/plugin login-oauth2 enforce-oauth2 off</info>            locked out: password logins work again on both sides\n" .
                 "  <info>bin/plugin login-oauth2 enforce-oauth2 on --admin</info>     only OAuth2 logins in the admin\n" .
+                "  <info>bin/plugin login-oauth2 enforce-oauth2 on --sign-out</info>  and sign everyone out, to log in again with OAuth2\n" .
                 "  <info>bin/plugin login-oauth2 enforce-oauth2 status</info>\n\n" .
                 "<info>off</info> turns it off in the main configuration and in every environment that turns it on (or only in --env).\n" .
                 "<info>on</info> only turns it on where it applies (an active provider) and the settings that let users in without OAuth2\n" .
-                "are off: the Login plugin's 'Remember me', and for the admin the API plugin's Session Authentication. A side chosen\n" .
-                "with --site or --admin is refused otherwise, of both sides the other one is left as it is. --force turns it on anyway.\n" .
+                "are off: the Login plugin's 'Remember me', and for the admin the API plugin's Session Authentication, in the main\n" .
+                "configuration and every environment (or only in --env). A side chosen with --site or --admin is refused otherwise,\n" .
+                "of both sides the other one is left as it is. --force turns it on anyway.\n" .
+                "<info>--sign-out</info> then ends the open sessions, 'remember me' cookies and Admin2 tokens of everyone if the site is\n" .
+                "on, else of the accounts with admin access, with the Login plugin's sign-out (Login 3.13.0 or newer). Also if it was on\n" .
+                "already. Not with a change of one environment's file (--env): the sign-out can't be limited to one environment.\n" .
                 "<info>status</info> shows both sides, why one doesn't apply, and those settings."
             );
     }
@@ -71,6 +79,18 @@ class OAuth2EnforceCommand extends ConsoleCommand
             return 1;
         }
 
+        if ($action !== 'on' && $this->input->getOption('sign-out')) {
+            $io->note("--sign-out only goes with 'on': nobody is signed out.");
+        }
+        // Accounts and Login's sign-out are shared by all environments: it can't sign out one environment's users only.
+        if ($action === 'on' && $this->input->getOption('sign-out') && !$settings->reachesEveryEnvironment()) {
+            $io->error([
+                "--sign-out can't sign out the users of one environment only: accounts and the Login plugin's sign-out are shared by all of them, also those where 'Enforce OAuth2' stays off. Nothing changed.",
+                'Turn it on without --sign-out, then sign users out with: bin/plugin login sign-out',
+            ]);
+
+            return 1;
+        }
         if ($action === 'status') {
             return $this->status($io, $settings, $sides);
         }
@@ -89,8 +109,8 @@ class OAuth2EnforceCommand extends ConsoleCommand
             $on = (bool)$settings->get($key);
             $why = $on ? $settings->notApplying($side) : null;
             $io->text(sprintf('%s: <info>%s</info>%s', ucfirst($side), $on ? 'on' : 'off', $why ? ", but doesn't apply: {$why}" : ''));
-            foreach ($settings->requirements($side) as $requirement => $met) {
-                $io->text(sprintf('  %s: %s', $requirement, $met ? 'off' : ($on ? '<error>on</error>, must be off: users can still log in without OAuth2' : 'on, must be off to turn it on')));
+            foreach ($settings->requirements($side) as $requirement => $where) {
+                $io->text(sprintf('  %s: %s', $requirement, Settings::requirementState($where, $on)));
             }
 
             foreach ($files as $file) {
@@ -212,7 +232,8 @@ class OAuth2EnforceCommand extends ConsoleCommand
             foreach ($skipped as $side => $reasons) {
                 $refused[] = ucfirst($side) . ': ' . $reasons;
             }
-            $refused[] = 'Nothing changed. Fix that first, or add --force to turn it on anyway'
+            $refused[] = 'Nothing changed' . ($this->input->getOption('sign-out') ? ', nobody was signed out' : '')
+                . '. Fix that first, or add --force to turn it on anyway'
                 . (count($sides) === 1 ? '' : ' (with --site or --admin for one side only)') . '.';
             $io->error($refused);
 
@@ -239,21 +260,132 @@ class OAuth2EnforceCommand extends ConsoleCommand
         }
 
         $applying = array_values(array_diff($on, array_keys($notApplying), array_keys($unmet)));
+        $signOut = (bool)$this->input->getOption('sign-out');
         if (!$change) {
             $io->success(sprintf("'Enforce OAuth2' is already on (%s).", implode(', ', $on)));
+        } else {
+            if ($applying && !$signOut) {
+                $io->note("It doesn't sign anyone out: open sessions, 'remember me' cookies and Admin2's tokens keep working until they expire. "
+                    . ($this->login() ? 'To end them, add --sign-out.' : "To end them, see 'Enforce OAuth2' in the README."));
+            }
+            $io->success(sprintf(
+                "'Enforce OAuth2' is on (%s)%s. To undo: bin/plugin login-oauth2 enforce-oauth2 off",
+                implode(', ', $on),
+                $applying ? ': only OAuth2 logins work' . ($applying !== $on ? ' (' . implode(', ', $applying) . ')' : '') . ($overrides ? ', except in the environments above' : '') : ''
+            ));
+        }
+
+        // Where it applies: elsewhere password logins still work, so signing out wouldn't make anyone use OAuth2.
+        return $signOut ? $this->signOut($io, array_values(array_diff($on, array_keys($notApplying)))) : 0;
+    }
+
+    /**
+     * The Login plugin's service if it can sign accounts out (Login::signOutAccounts(), signOutEveryone(), and
+     * getAccounts() to find the ones with admin access), else null.
+     *
+     * @return Login|null
+     */
+    protected function login(): ?Login
+    {
+        $grav = Grav::instance();
+        $login = isset($grav['login']) ? $grav['login'] : null;
+
+        return $login instanceof Login && method_exists($login, 'signOutAccounts') && method_exists($login, 'signOutEveryone') && method_exists($login, 'getAccounts') ? $login : null;
+    }
+
+    /**
+     * --sign-out: signs out the users who could have logged in without OAuth2 on the sides where it's on and applies,
+     * with the Login plugin's sign-out: everyone if the site is one of them (also the users without an account file),
+     * else only the accounts with admin access (OAuth2::hasAdminAccess()). Their sessions, "remember me" cookies and
+     * Admin2 tokens end; API keys keep working. 1 if it could sign out nobody or not everyone.
+     *
+     * @param string[] $sides
+     */
+    protected function signOut(SymfonyStyle $io, array $sides): int
+    {
+        if (!$sides) {
+            $io->note("Nobody was signed out: 'Enforce OAuth2' doesn't apply yet, so logins with a password still work.");
 
             return 0;
         }
-        if ($applying) {
-            $io->note("It doesn't sign anyone out: open sessions, 'remember me' cookies and Admin2's tokens keep working until they expire. "
-                . (method_exists('Grav\Plugin\Login\Login', 'signOutEverywhere') ? 'To end them: bin/plugin login sign-out --all' : "To end them, see 'Enforce OAuth2' in the README."));
-        }
-        $io->success(sprintf(
-            "'Enforce OAuth2' is on (%s)%s. To undo: bin/plugin login-oauth2 enforce-oauth2 off",
-            implode(', ', $on),
-            $applying ? ': only OAuth2 logins work' . ($applying !== $on ? ' (' . implode(', ', $applying) . ')' : '') . ($overrides ? ', except in the environments above' : '') : ''
-        ));
+        $login = $this->login();
+        if (!$login) {
+            $grav = Grav::instance();
+            $io->error(sprintf(
+                "Nobody was signed out: %s. To end open sessions, 'remember me' cookies and Admin2's tokens, see 'Enforce OAuth2' in the README.",
+                isset($grav['login']) ? "the Login plugin can't sign users out (it needs Login 3.13.0 or newer)" : "the Login plugin isn't loaded (disabled, or the plugins couldn't be initialized)"
+            ));
 
-        return 0;
+            return 1;
+        }
+
+        $by = 'from the command line: login-oauth2 enforce-oauth2 on --sign-out';
+        $everyone = in_array('site', $sides, true);
+        if ($everyone) {
+            $result = $login->signOutEveryone($by);
+        } else {
+            $result = $login->signOutAccounts($this->adminAccounts($login), $by);
+            foreach ($result['signed_out'] as $username) {
+                $io->text(sprintf('  Signed out "%s"', $username));
+            }
+        }
+
+        $failed = 0;
+        foreach ($result['failed'] as $failure) {
+            $io->error(sprintf('Could not sign out "%s": %s', $failure['username'], $failure['error']));
+            $failed++;
+        }
+        // Listed with admin access, but gone when Login read it again (e.g. removed meanwhile).
+        foreach ($result['missing'] ?? [] as $username) {
+            $io->error(sprintf('Could not sign out "%s": the account could not be read anymore.', $username));
+            $failed++;
+        }
+        $count = count($result['signed_out']);
+        if ($count) {
+            // Signed-in web processes may hold the accounts in Grav's cache (Flex accounts).
+            $this->invalidateCache();
+        }
+        if ($everyone && empty($result['sessions_ended'])) {
+            $io->error('The sessions of users without an account file could not be ended: user/data/login/sign-out-all.yaml could not be written (see the Grav log).');
+            $failed++;
+        }
+
+        if (!$everyone && !$count && !$failed) {
+            $io->note('Nobody was signed out: no account has admin access.');
+
+            return 0;
+        }
+        $message = sprintf(
+            '%sSigned %d account%s%s out everywhere%s',
+            $everyone && !empty($result['sessions_ended']) ? 'Every session that logged in before now ends on its next request. ' : '',
+            $count,
+            $count === 1 ? '' : 's',
+            $everyone ? '' : ' with admin access',
+            $failed ? ', but not everyone (see above).' : ': they log in again with OAuth2.'
+        );
+        $failed ? $io->warning($message) : $io->success($message);
+        $io->note('API keys keep working: revoke them in Admin2 if needed.');
+
+        return $failed ? 1 : 0;
+    }
+
+    /**
+     * The usernames of the accounts with admin access (OAuth2::hasAdminAccess()), also disabled ones (their cookies and
+     * tokens would work again once enabled), from the Login plugin's list of accounts (Login::getAccounts(), which
+     * skips account files it can't read).
+     *
+     * @param Login $login The Login plugin's service (login())
+     * @return string[]
+     */
+    protected function adminAccounts(Login $login): array
+    {
+        $admins = [];
+        foreach ($login->getAccounts() as $account) {
+            if (OAuth2::hasAdminAccess($account, true)) {
+                $admins[] = (string)$account->get('username');
+            }
+        }
+
+        return $admins;
     }
 }

@@ -7,7 +7,8 @@
     * Enforce OAuth2 also hides the password form (`show_password_form`): on the site's login page with Login 3.12.1 or newer, and on the Admin2 login screen with API 1.1.11 and Admin2 2.2.8 or newer
     * Enforce OAuth2 on the site also turns magic links off: the login page hides the "Login by link" button, the magic-link page and emailed links redirect to the login page, and magic-link requests are refused
     * CLI commands (`bin/plugin login-oauth2`): `status`, `enforce-oauth2 on|off|status` (e.g. to get back in when locked out) and `provider enable|disable|verify-certificate`
-    * Enforce OAuth2 requires the Login plugin's "Remember me" off, and in the admin also the API plugin's Session Authentication, as both let users in without OAuth2: turning it on is refused otherwise (settings and `enforce-oauth2 on`; `--force` turns it on anyway). The plugin never changes them itself
+    * `enforce-oauth2 on --sign-out` also signs out the users who could have logged in without OAuth2 (everyone for the site, accounts with admin access for the admin), with the Login plugin's sign-out (Login 3.13.0 or newer)
+    * Enforce OAuth2 requires the Login plugin's "Remember me" off, and in the admin also the API plugin's Session Authentication, as both let users in without OAuth2: turning it on is refused otherwise (settings, and `enforce-oauth2 on`, which checks the main configuration and every environment; `--force` turns it on anyway). The plugin never changes them itself
 1. [](#improved)
     * Below each "Enforce OAuth2" toggle, Admin2 shows the settings it requires with their state and why, while the toggle is on in the form, and why it doesn't apply yet (no active provider, or "Enabled in Admin" off); the classic admin shows the latter
     * A red warning in the settings and on Admin2's dashboard while "Enforce OAuth2" is on but a setting it requires off is on

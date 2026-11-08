@@ -70,8 +70,8 @@ class OAuth2StatusCommand extends ConsoleCommand
             $enforced = (bool)$settings->get(Settings::key($side, 'enforce_oauth2'));
             $list[] = ['Enforce OAuth2' => !$enforced ? 'off' : ($why ? "on, but doesn't apply: {$why}" : 'on')];
             // The settings it requires off (they let users in without OAuth2).
-            foreach ($settings->requirements($side) as $requirement => $met) {
-                $list[] = ['  ' . $requirement => $met ? 'off' : ($enforced ? '<error>on</error>, must be off: users can still log in without OAuth2' : 'on, must be off to turn it on')];
+            foreach ($settings->requirements($side) as $requirement => $where) {
+                $list[] = ['  ' . $requirement => Settings::requirementState($where, $enforced)];
             }
             $list[] = ['Require Existing Grav user' => $onOff($oauth2->requireGravUser()) . ($settings->get(Settings::key($side, 'require_grav_user')) === null ? $follows : '')];
             $list[] = ['Save Grav user' => $onOff($oauth2->saveGravUser()) . ($settings->get(Settings::key($side, 'save_grav_user')) === null ? $follows : '')];

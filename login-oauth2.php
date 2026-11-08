@@ -9,9 +9,7 @@ use Grav\Common\Debugger;
 use Grav\Common\Language\Language;
 use Grav\Common\Plugin;
 use Grav\Common\Session;
-use Grav\Common\Uri;
 use Grav\Common\User\Interfaces\UserCollectionInterface;
-use Grav\Common\User\Interfaces\UserInterface;
 use Grav\Plugin\Api\Exceptions\ForbiddenException as ApiForbiddenException;
 use Grav\Plugin\Api\Exceptions\ValidationException as ApiValidationException;
 use Grav\Plugin\Login\Events\UserLoginEvent;
@@ -340,7 +338,7 @@ class LoginOauth2Plugin extends Plugin
                 if ($this->config->get('plugins.login.redirect_after_login')) {
                     $redirect = (string) $this->config->get('plugins.login.route_after_login');
                 } else {
-                    /** @var Uri $uri */
+                    /** @var \Psr\Http\Message\ServerRequestInterface $request */
                     $request = $this->grav['request'];
                     $redirect = (string) $request->getUri();
                 }
@@ -508,7 +506,7 @@ class LoginOauth2Plugin extends Plugin
             return;
         }
         $user = $event->getUser();
-        if (!$user || !static::hasAdminAccess($user)) {
+        if (!OAuth2::hasAdminAccess($user)) {
             return;
         }
 
@@ -516,28 +514,6 @@ class LoginOauth2Plugin extends Plugin
         $event->setMessage($this->grav['language']->translate('PLUGIN_LOGIN_OAUTH2.ENFORCE_OAUTH2_ADMIN_ACCOUNT'), 'error');
         $event->setStatus($event::AUTHORIZATION_DENIED);
         $event->stopPropagation();
-    }
-
-    /**
-     * Whether an account can use the admin: the classic admin (admin.login, admin.super) or the API that Admin2 uses
-     * (api.access, api.super). Asked as if its login were authorized already: until then Grav only answers login
-     * actions (and its "test" scope, which would skip that, only exists for Flex accounts).
-     */
-    protected static function hasAdminAccess(UserInterface $user): bool
-    {
-        $authorized = $user->authorized;
-        $user->authorized = true;
-        try {
-            foreach (['admin.login', 'admin.super', 'api.access', 'api.super'] as $action) {
-                if ($user->authorize($action)) {
-                    return true;
-                }
-            }
-
-            return false;
-        } finally {
-            $user->authorized = $authorized;
-        }
     }
 
     /**
@@ -642,7 +618,8 @@ class LoginOauth2Plugin extends Plugin
                 // If username cannot be found, fall back to email address.
                 $exists = $grav_user->exists();
                 if (!$exists) {
-                    $found_user = $accounts->find($userdata['email'], ['email']);
+                    // Not every provider sends one (e.g. Instagram, or one of another plugin).
+                    $found_user = $accounts->find($userdata['email'] ?? null, ['email']);
                     if ($found_user->exists()) {
                         $grav_user = $found_user;
                         $exists = true;
@@ -783,7 +760,7 @@ class LoginOauth2Plugin extends Plugin
         foreach ($oauth2->getProviders() as $name => $options) {
             $providers[] = [
                 'id'     => (string) $name,
-                'label'  => (string) ($options['label'] ?? '') ?: static::providerLabel((string) $name),
+                'label'  => (string) ($options['label'] ?? '') ?: self::providerLabel((string) $name),
                 'icon'   => (string) $name,
                 'plugin' => 'login-oauth2',
             ];
@@ -917,7 +894,7 @@ class LoginOauth2Plugin extends Plugin
         unset($session->oauth2_state, $session->oauth2_provider);
 
         $user = $loginEvent->getUser();
-        if ($user && $user->authenticated) {
+        if ($user->authenticated) {
             $event['user'] = $user;
         } else {
             $message = $loginEvent->getMessage();

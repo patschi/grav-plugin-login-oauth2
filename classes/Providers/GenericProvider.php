@@ -294,7 +294,20 @@ class GenericProvider extends BaseProvider
         }
 
         $config = $grav['config'];
-        $filter = array_filter((array)$this->config->get('providers.generic.group_filter'), 'strlen');
+        $patterns = (array)$this->config->get('providers.generic.group_filter');
+        // A list or map typed by mistake matches nothing: skipped, as leaving it out could leave no filter, and every
+        // group of the provider would be synced.
+        foreach ($patterns as $pattern) {
+            if ($pattern !== null && !is_scalar($pattern)) {
+                $this->log('warning', 'group sync skipped, "Provider Groups to Sync" has an entry that is no group name or pattern', $pattern);
+
+                return;
+            }
+        }
+        // Patterns as YAML gives them (a number stays one), without empty ones.
+        $filter = array_filter($patterns, static function ($pattern): bool {
+            return $pattern !== null && (string)$pattern !== '';
+        });
         $prefix = (string)$this->config->get('providers.generic.group_prefix');
         // A prefix without letters or digits ("!", "-") would vanish from the slugs, giving the provider every Grav group.
         if ($prefix !== '' && $this->groupName($prefix) === '') {
@@ -389,7 +402,9 @@ class GenericProvider extends BaseProvider
             return [];
         }
 
-        return array_values(array_filter($claim, 'strlen'));
+        return array_values(array_filter($claim, static function (string $group): bool {
+            return $group !== '';
+        }));
     }
 
     /**

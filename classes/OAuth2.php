@@ -3,10 +3,20 @@
 namespace Grav\Plugin\Login\OAuth2;
 
 use Grav\Common\Grav;
+use Grav\Common\User\Interfaces\UserInterface;
 use RocketTheme\Toolbox\Event\Event;
 
 class OAuth2
 {
+    /**
+     * The setting that turns each requirement of "Enforce OAuth2" (enforceRequirements()) on, which has to be off.
+     * Session Authentication only counts while the API plugin is enabled.
+     */
+    public const REQUIREMENT_KEYS = [
+        'remember_me' => 'plugins.login.rememberme.enabled',
+        'session_passthrough' => 'plugins.api.auth.session_enabled',
+    ];
+
     /** @var array */
     protected $config;
     /** @var array */
@@ -122,14 +132,18 @@ class OAuth2
      * show them. The plugin never changes them itself.
      *
      * @param bool $admin
+     * @param callable|null $get Reads a setting by its config path, e.g. of one environment (the CLI); default: Grav's
+     *                           configuration of this request
      * @return array<string, bool>
      */
-    public static function enforceRequirements(bool $admin): array
+    public static function enforceRequirements(bool $admin, ?callable $get = null): array
     {
-        $config = Grav::instance()['config'];
-        $requirements = ['remember_me' => !$config->get('plugins.login.rememberme.enabled')];
+        $get = $get ?? static function (string $key) {
+            return Grav::instance()['config']->get($key);
+        };
+        $requirements = ['remember_me' => !$get(static::REQUIREMENT_KEYS['remember_me'])];
         if ($admin) {
-            $requirements['session_passthrough'] = !$config->get('plugins.api.enabled') || !$config->get('plugins.api.auth.session_enabled');
+            $requirements['session_passthrough'] = !$get('plugins.api.enabled') || !$get(static::REQUIREMENT_KEYS['session_passthrough']);
         }
 
         return $requirements;
@@ -149,6 +163,44 @@ class OAuth2
     }
 
     /**
+     * Whether an account can use the admin: the classic admin (admin.login, admin.super) or the API that Admin2 uses
+     * (api.access, api.super). Asked as if it were logged in and its login authorized: until then Grav only answers
+     * login actions, and an account loaded from its file (e.g. by a command) answers nothing (Grav's "test" scope,
+     * which would skip both, only exists for Flex accounts). With $anyState also a disabled account, as if it were
+     * enabled (Grav answers nothing for those either), e.g. to sign it out before it's enabled again.
+     *
+     * @param UserInterface $user
+     * @param bool $anyState
+     * @return bool
+     */
+    public static function hasAdminAccess(UserInterface $user, bool $anyState = false): bool
+    {
+        $authenticated = $user->authenticated;
+        $authorized = $user->authorized;
+        $state = $user->get('state');
+        $user->authenticated = true;
+        $user->authorized = true;
+        if ($anyState) {
+            $user->set('state', 'enabled');
+        }
+        try {
+            foreach (['admin.login', 'admin.super', 'api.access', 'api.super'] as $action) {
+                if ($user->authorize($action)) {
+                    return true;
+                }
+            }
+
+            return false;
+        } finally {
+            $user->authenticated = $authenticated;
+            $user->authorized = $authorized;
+            if ($anyState) {
+                $state === null ? $user->undef('state') : $user->set('state', $state);
+            }
+        }
+    }
+
+    /**
      * The names of requirements (enforceRequirements()) in words, e.g. "Login → 'Remember me' and API → Session
      * Authentication".
      *
@@ -157,12 +209,22 @@ class OAuth2
     public static function requirementNames(array $requirements): string
     {
         $language = Grav::instance()['language'];
-        $names = array_map(static function (string $requirement) use ($language) {
-            return (string)$language->translate('PLUGIN_LOGIN_OAUTH2.ENFORCE_REQUIREMENT_' . strtoupper($requirement));
-        }, $requirements);
-        $last = array_pop($names);
 
-        return $names ? implode(', ', $names) . ' ' . $language->translate('PLUGIN_LOGIN_OAUTH2.AND') . ' ' . $last : (string)$last;
+        return static::andList(array_map(static function (string $requirement) use ($language) {
+            return (string)$language->translate('PLUGIN_LOGIN_OAUTH2.ENFORCE_REQUIREMENT_' . strtoupper($requirement));
+        }, $requirements));
+    }
+
+    /**
+     * Words as a list: "A", "A and B", "A, B and C".
+     *
+     * @param string[] $words
+     */
+    public static function andList(array $words): string
+    {
+        $last = array_pop($words);
+
+        return $words ? implode(', ', $words) . ' ' . Grav::instance()['language']->translate('PLUGIN_LOGIN_OAUTH2.AND') . ' ' . $last : (string)$last;
     }
 
     /**
@@ -417,11 +479,11 @@ class OAuth2
      * The providers of a side's login: a service with this plugin's enabled providers and the ones satellite plugins
      * add (registerProviders()).
      *
-     * @return static
+     * @return self
      */
     public static function registered(bool $admin): self
     {
-        return (new static($admin))->registerProviders();
+        return (new self($admin))->registerProviders();
     }
 
     /**

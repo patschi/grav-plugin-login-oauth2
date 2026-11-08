@@ -111,7 +111,8 @@ abstract class BaseProvider implements ProviderInterface
     }
 
     /**
-     * @param string $admin
+     * @param string $admin 'auto': the side of the current login; else a non-empty string (e.g. 'admin') for the
+     *                      admin's callback URI, an empty one for the site's
      * @return string
      */
     public static function getCallbackUri(string $admin = 'auto'): string
@@ -142,7 +143,7 @@ abstract class BaseProvider implements ProviderInterface
 
         $config = Grav::instance()['config'];
         if ($config->get('plugins.admin.enabled') && !$config->get('plugins.admin2.enabled')) {
-            return static::getCallbackUri(true);
+            return static::getCallbackUri('admin');
         }
 
         $api = '/' . trim((string)$config->get('plugins.api.route', '/api'), '/') . '/' . trim((string)$config->get('plugins.api.version_prefix', 'v1'), '/');

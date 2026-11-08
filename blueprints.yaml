@@ -163,7 +163,7 @@ form:
               copy_to_clipboard: true
               label: PLUGIN_LOGIN_OAUTH2.SITE_CALLBACK_URI
               help: PLUGIN_LOGIN_OAUTH2.SITE_CALLBACK_URI_HELP
-              data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getCallbackUri', false]
+              data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getCallbackUri', '']
 
             users_section:
               type: section
