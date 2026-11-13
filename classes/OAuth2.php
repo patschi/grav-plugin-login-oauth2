@@ -150,8 +150,8 @@ class OAuth2
     /**
      * The "Admin Callback URI" of the settings form (blueprint: data-content@), for the admin that shows it. Admin2
      * logins return to the API plugin, which has one URI per provider (BaseProvider::getAdminCallbackUri()): they're
-     * listed for the providers of callbackProviders(). Classic admin logins return to the admin's route, the same for
-     * every provider.
+     * listed for the providers of callbackProviders(), as a table without lines (provider, URI). Classic admin logins
+     * return to the admin's route, the same for every provider.
      */
     public static function adminCallbackUris(): string
     {
@@ -164,12 +164,16 @@ class OAuth2
                 return $uri(BaseProvider::getCallbackUri('admin'));
             }
 
-            $items = '';
+            $rows = '';
             foreach (static::callbackProviders() as $provider => $label) {
-                $items .= sprintf('<li><span class="font-medium">%s</span> %s</li>', htmlspecialchars($label, ENT_QUOTES), $uri(BaseProvider::getAdminCallbackUri((string)$provider)));
+                $rows .= sprintf(
+                    '<tr><td class="border-0 py-0.5 pe-4 align-top font-medium whitespace-nowrap">%s</td><td class="border-0 py-0.5 align-top">%s</td></tr>',
+                    htmlspecialchars($label, ENT_QUOTES),
+                    $uri(BaseProvider::getAdminCallbackUri((string)$provider))
+                );
             }
 
-            return '<ul class="space-y-1 text-sm">' . $items . '</ul>';
+            return '<table class="border-0 text-sm"><tbody>' . $rows . '</tbody></table>';
         } catch (\Throwable $e) {
             return '';
         }
