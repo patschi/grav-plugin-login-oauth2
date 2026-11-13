@@ -3,28 +3,28 @@
 namespace Grav\Plugin\Console;
 
 use Grav\Common\Grav;
-use Grav\Console\ConsoleCommand;
 use Grav\Plugin\Login\OAuth2\Console\Settings;
+use Grav\Plugin\Login\OAuth2\Console\SettingsCommand;
 use Grav\Plugin\Login\OAuth2\OAuth2;
-use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Style\SymfonyStyle;
-use Throwable;
+
+// The plugin's classes, also while the plugin isn't loaded.
+require_once __DIR__ . '/../vendor/autoload.php';
 
 /**
  * bin/plugin login-oauth2 status: shows the login settings of the site and the admin.
  */
-class OAuth2StatusCommand extends ConsoleCommand
+class OAuth2StatusCommand extends SettingsCommand
 {
     protected function configure()
     {
         $this
             ->setName('status')
-            ->addOption('site', null, InputOption::VALUE_NONE, 'Only the site')
-            ->addOption('admin', null, InputOption::VALUE_NONE, 'Only the admin')
+            ->addSideOptions()
             ->setDescription('Shows the login settings: Enforce OAuth2, the providers and their state')
             ->setHelp(
-                "The <info>status</info> command shows, for the site and the admin, whether 'Enforce OAuth2' is on and applies, every provider\n" .
-                "(active, or why not) with 'Verify Certificate' where it has it, and the account settings. It changes nothing.\n\n" .
+                "<info>status</info> shows, for the site and the admin, whether 'Enforce OAuth2' is on and applies, each provider\n" .
+                "(active, or why not) and the account settings. It changes nothing.\n\n" .
                 "  <info>bin/plugin login-oauth2 status</info>\n" .
                 "  <info>bin/plugin login-oauth2 status --admin</info>"
             );
@@ -32,18 +32,11 @@ class OAuth2StatusCommand extends ConsoleCommand
 
     protected function serve()
     {
-        include __DIR__ . '/../vendor/autoload.php';
-
         $io = new SymfonyStyle($this->input, $this->output);
-        try {
-            $this->initializePlugins();
-        } catch (Throwable $e) {
-            // E.g. the Login plugin is disabled: then the satellite plugins can't add their providers.
-            $this->initializeGrav();
-            $io->warning('The plugins could not be initialized, providers of other plugins are missing: ' . $e->getMessage());
+        $settings = $this->settings($io);
+        if (!$settings) {
+            return 1;
         }
-
-        $settings = new Settings(Grav::instance(), $this->input);
         $onOff = static function ($value): string {
             return $value ? 'on' : 'off';
         };
@@ -67,11 +60,15 @@ class OAuth2StatusCommand extends ConsoleCommand
             if ($side === 'admin') {
                 $list[] = ['Enabled in Admin' => $onOff($settings->get('admin.enabled'))];
             }
-            $enforced = (bool)$settings->get(Settings::key($side, 'enforce_oauth2'));
-            $list[] = ['Enforce OAuth2' => !$enforced ? 'off' : ($why ? "on, but doesn't apply: {$why}" : 'on')];
+            $key = Settings::key($side, 'enforce_oauth2');
+            $enforced = (bool)$settings->get($key);
+            // Off here, but environments may turn it on.
+            $elsewhere = $enforced ? [] : $settings->stillOn($key);
+            // On, but not applying here: with the environments where it does (e.g. with their own provider).
+            $list[] = ['Enforce OAuth2' => !$enforced ? 'off' . ($elsewhere ? ' (on in ' . implode(', ', $elsewhere) . ')' : '') : ($why ? "on, but doesn't apply: {$why}" . static::appliesIn($settings, $side) : 'on')];
             // The settings it requires off (they let users in without OAuth2).
             foreach ($settings->requirements($side) as $requirement => $where) {
-                $list[] = ['  ' . $requirement => Settings::requirementState($where, $enforced)];
+                $list[] = ['  ' . $requirement => Settings::requirementState($where)];
             }
             $list[] = ['Require Existing Grav user' => $onOff($oauth2->requireGravUser()) . ($settings->get(Settings::key($side, 'require_grav_user')) === null ? $follows : '')];
             $list[] = ['Save Grav user' => $onOff($oauth2->saveGravUser()) . ($settings->get(Settings::key($side, 'save_grav_user')) === null ? $follows : '')];
@@ -92,6 +89,9 @@ class OAuth2StatusCommand extends ConsoleCommand
                 $rows[] = [$provider, isset($active[$provider]) ? 'on (other plugin)' : 'on, but missing client_id (other plugin)', ''];
             }
             $io->table(['Provider', 'State', 'Verify Certificate'], $rows);
+        }
+        if ($unreadable = static::unreadable($settings)) {
+            $io->warning(array_merge(["Can't read these config files, so their settings are unknown:"], $unreadable));
         }
 
         return 0;

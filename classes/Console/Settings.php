@@ -2,39 +2,42 @@
 
 namespace Grav\Plugin\Login\OAuth2\Console;
 
+use Grav\Common\Config\Setup;
 use Grav\Common\File\CompiledYamlFile;
 use Grav\Common\Filesystem\Folder;
 use Grav\Common\Grav;
 use Grav\Common\Utils;
+use Grav\Common\Yaml;
+use Grav\Plugin\Login\OAuth2\EnvironmentSettings;
 use Grav\Plugin\Login\OAuth2\OAuth2;
+use RuntimeException;
 use Symfony\Component\Console\Input\InputInterface;
 
 /**
  * The plugin settings for the bin/plugin commands: reads the configuration Grav uses, changes the config files (the
- * main one and those of the environments), and tells the active providers of a side, the settings a provider has and
- * the settings of other plugins "Enforce OAuth2" requires off, in every environment.
+ * main one and those of the environments), and tells the active providers of a side, the settings a provider has and,
+ * as EnvironmentSettings, the settings of other plugins "Enforce OAuth2" requires off, in every environment.
  */
-class Settings
+class Settings extends EnvironmentSettings
 {
-    /** @var Grav */
-    protected $grav;
-    /** @var InputInterface */
+    /** @var InputInterface The command's input */
     protected $input;
-    /** @var array<string, array<string, mixed>> Plugin => its default configuration, each read once */
-    protected $defaults = [];
-    /** @var array File => content, each config file read once (save() keeps it current) */
-    protected $contents = [];
     /** @var string[]|null The plugin's existing config files, found once (save() can add one) */
     protected $files;
-    /** @var string[]|null The folders environments can have (environmentFolders()), found once */
-    protected $environmentFolders;
-    /** @var string|null The main config folder (configFile()), found once */
-    protected $mainConfig;
+    /** @var array<string, string> Side => why the providers of other plugins couldn't be registered (registeredProviders()) */
+    protected $unregistered = [];
 
+    /**
+     * Changes go to the environment's config file if it has a folder (--env or GRAV_ENVIRONMENT), created if needed,
+     * else to the main one. Never to the one of Grav's CLI default environment "cli", which web requests don't use.
+     */
     public function __construct(Grav $grav, InputInterface $input)
     {
+        // What cliDefault() asks.
         $this->grav = $grav;
         $this->input = $input;
+        $folder = $this->cliDefault() ? false : $grav['locator']->findResource('environment://', true);
+        parent::__construct($grav, $folder ?: null);
         $this->ignoreCliEnvironment();
     }
 
@@ -56,18 +59,6 @@ class Settings
     }
 
     /**
-     * The key of a setting on a side: as given for the site, below "admin." for the admin.
-     *
-     * @param string $side
-     * @param string $key
-     * @return string
-     */
-    public static function key(string $side, string $key): string
-    {
-        return ($side === 'admin' ? 'admin.' : '') . $key;
-    }
-
-    /**
      * A setting as Grav uses it: the plugin's default, overridden by the config files (of the environment, --env).
      *
      * @param string $key
@@ -77,58 +68,6 @@ class Settings
     public function get(string $key, $default = null)
     {
         return $this->grav['config']->get('plugins.login-oauth2.' . $key, $default);
-    }
-
-    /**
-     * The config file changes are saved to: the environment's if it has a folder (--env or GRAV_ENVIRONMENT), created
-     * if needed, else the main one. Never the one of Grav's CLI default environment "cli", which web requests don't use.
-     *
-     * @return string
-     */
-    public function file(): string
-    {
-        $folder = $this->cliDefault() ? false : $this->grav['locator']->findResource('environment://', true);
-
-        return $folder ? $this->configFile('login-oauth2', $folder) : $this->mainFile();
-    }
-
-    /**
-     * The main config file, which the files of the environments override: in the folder of the config stream that is
-     * neither the environment's nor Grav's own, as Grav loads it (user/config, unless setup.php changes the stream).
-     *
-     * @return string
-     */
-    public function mainFile(): string
-    {
-        return $this->configFile('login-oauth2');
-    }
-
-    /**
-     * A plugin's config file: the main one (mainFile()), or the one in an environment's folder.
-     *
-     * @param string $plugin
-     * @param string|null $folder The environment's folder, null for the main config file
-     * @return string
-     */
-    public function configFile(string $plugin, ?string $folder = null): string
-    {
-        if ($folder !== null) {
-            return "{$folder}/config/plugins/{$plugin}.yaml";
-        }
-
-        if ($this->mainConfig === null) {
-            $locator = $this->grav['locator'];
-            $other = [$locator->findResource('environment://config', true), $locator->findResource('system://config', true)];
-            $this->mainConfig = $locator->findResource('user://', true) . '/config';
-            foreach ($locator->findResources('config://', true) as $config) {
-                if (!in_array($config, $other, true)) {
-                    $this->mainConfig = $config;
-                    break;
-                }
-            }
-        }
-
-        return "{$this->mainConfig}/plugins/{$plugin}.yaml";
     }
 
     /**
@@ -146,6 +85,53 @@ class Settings
         }
 
         return sprintf("Environment '%s' has no folder: nothing changed.", $input->getOption('env'));
+    }
+
+    /**
+     * The environment whose file alone changes go to, as a later command needs it for --env to reach the same file;
+     * null if they go to the main file, or to a folder all requests use (reachesEveryEnvironment()).
+     *
+     * @return string|null
+     */
+    public function environment(): ?string
+    {
+        return $this->reachesEveryEnvironment() ? null : (string)$this->grav['setup']->get('environment');
+    }
+
+    /**
+     * The providers a side's login gets (EnvironmentSettings::registeredProviders()). If a plugin that adds providers
+     * fails (its handler of onOAuth2ProvidersRegister throws), this plugin's own enabled ones alone, so the commands
+     * still work: they warn about it (providersFailed()).
+     *
+     * @param string $side
+     * @return array Name => settings
+     */
+    public function registeredProviders(string $side): array
+    {
+        try {
+            return parent::registeredProviders($side);
+        } catch (\Throwable $e) {
+            $this->unregistered[$side] = $e->getMessage();
+            $config = (array)($this->grav['config']->get('plugins.login-oauth2') ?? []);
+
+            // Kept until the settings change (replace()), instead of asking the failing plugin each time.
+            return $this->registeredProviders[$side] = OAuth2::enabledProviders($side === 'admin', $config);
+        }
+    }
+
+    /**
+     * Why the providers of other plugins couldn't be registered (registeredProviders()), null if they could: asked
+     * for both sides when a command starts, for its warning.
+     *
+     * @return string|null
+     */
+    public function providersFailed(): ?string
+    {
+        foreach (['site', 'admin'] as $side) {
+            $this->registeredProviders($side);
+        }
+
+        return $this->unregistered ? implode('; ', array_unique($this->unregistered)) : null;
     }
 
     /**
@@ -177,132 +163,27 @@ class Settings
     }
 
     /**
-     * The folders environments can have, found where Grav looks for them (Setup): the folder of
-     * GRAV_ENVIRONMENT_PATH, else the folders in GRAV_ENVIRONMENTS_PATH, else in user/env, else in user/ (Grav 1.6
-     * layout, so also folders that are no environment); and the folder of the current environment, first.
+     * The environment whose file changes are saved to and what chose it, for the messages, e.g. "environment 'staging',
+     * chosen by --env".
      *
-     * @return string[]
+     * @return string
      */
-    protected function environmentFolders(): array
+    public function environmentSource(): string
     {
-        if ($this->environmentFolders !== null) {
-            return $this->environmentFolders;
-        }
-
-        // Grav has no API to list its environments.
-        $locator = $this->grav['locator'];
-        $user = (string)$locator->findResource('user://', true);
-        $folders = [];
-        if ($current = $locator->findResource('environment://', true)) {
-            $folders[] = $current;
-        }
-        if (($path = static::setting('GRAV_ENVIRONMENT_PATH')) !== null) {
-            $folders[] = $this->path($path);
+        $name = (string)$this->grav['setup']->get('environment');
+        if ($name !== (string)Setup::$environment) {
+            $from = 'setup.php';
         } else {
-            $root = static::setting('GRAV_ENVIRONMENTS_PATH');
-            $root = $root !== null ? $this->path($root) : (is_dir($user . '/env') ? $user . '/env' : $user);
-            $folders = array_merge($folders, static::folders($root));
+            $from = $this->input->hasParameterOption('--env') ? '--env' : 'GRAV_ENVIRONMENT';
         }
 
-        return $this->environmentFolders = array_values(array_filter($folders));
-    }
-
-    /**
-     * Whether a change written to file() reaches every web request: written to the main file, or to the folder of
-     * GRAV_ENVIRONMENT_PATH, which all requests use. Not for the file of one environment (--env, GRAV_ENVIRONMENT).
-     *
-     * @return bool
-     */
-    public function reachesEveryEnvironment(): bool
-    {
-        return $this->file() === $this->mainFile() || static::setting('GRAV_ENVIRONMENT_PATH') !== null;
-    }
-
-    /**
-     * The configurations of the web requests a change of "Enforce OAuth2" on a side reaches, as their environment's
-     * folder (null: the main configuration alone, for the requests without one). A change of the environment's file
-     * (--env, GRAV_ENVIRONMENT or GRAV_ENVIRONMENT_PATH) reaches its requests only. A change of the main file (Grav's
-     * CLI default environment "cli", or an environment without a folder) reaches the main configuration and every
-     * environment that has a config folder, except "cli" (web requests don't use it) and those where it can't apply
-     * (enforceable()).
-     *
-     * @param string $side
-     * @return array<string|null>
-     */
-    protected function contexts(string $side): array
-    {
-        $current = $this->grav['locator']->findResource('environment://', true) ?: null;
-        if ($this->file() !== $this->mainFile()) {
-            return [$current];
-        }
-
-        $skip = $current && $this->cliDefault() ? [realpath($current) ?: $current => true] : [];
-        $contexts = [null];
-        foreach ($this->environmentFolders() as $folder) {
-            $real = realpath($folder) ?: $folder;
-            if (isset($skip[$real]) || !is_dir($folder . '/config')) {
-                continue;
-            }
-            $skip[$real] = true;
-            if ($this->enforceable($folder, $side)) {
-                $contexts[] = $folder;
-            }
-        }
-
-        return $contexts;
-    }
-
-    /**
-     * Whether "Enforce OAuth2" on a side, turned on in the main file, can apply in an environment: not if the
-     * environment turns it off itself, or has the plugin (for the admin also "Enabled in Admin") off.
-     *
-     * @param string $folder The environment's folder
-     * @param string $side
-     * @return bool
-     */
-    protected function enforceable(string $folder, string $side): bool
-    {
-        $own = $this->read($this->configFile('login-oauth2', $folder), static::key($side, 'enforce_oauth2'));
-        if ($own !== null && !$own) {
-            return false;
-        }
-        foreach ($side === 'admin' ? ['enabled', 'admin.enabled'] : ['enabled'] as $key) {
-            if (!$this->contextValue($folder, "plugins.login-oauth2.{$key}")[0]) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    /**
-     * A setting in one of the configurations of contexts(), by its config path (e.g. "plugins.login.rememberme.enabled"),
-     * as Grav merges it: the environment's config file, else the main one, else the plugin's default. With where to
-     * change it: the file that sets it, else (the plugin's default) the main file, for the messages.
-     *
-     * @param string|null $folder The environment's folder, null for the main configuration
-     * @param string $path "plugins.<plugin>.<key>"
-     * @return array{0: mixed, 1: string} The value and where to change it, e.g. "user/env/example.com/config/plugins/login.yaml"
-     *                                    or "default: set it in user/config/plugins/login.yaml"
-     */
-    protected function contextValue(?string $folder, string $path): array
-    {
-        [, $plugin, $key] = explode('.', $path, 3) + ['', '', ''];
-        $main = $this->configFile($plugin);
-        foreach ($folder !== null ? [$this->configFile($plugin, $folder), $main] : [$main] as $file) {
-            $value = $this->read($file, $key);
-            if ($value !== null) {
-                return [$value, Folder::getRelativePath($file)];
-            }
-        }
-
-        return [Utils::getDotNotation($this->pluginDefaults($plugin), $key), 'default: set it in ' . Folder::getRelativePath($main)];
+        return "environment '{$name}', chosen by {$from}";
     }
 
     /**
      * The environment config files that set one of these keys to another value than the main file: Grav reads them
      * after the main one, so on the requests of their environment they override a change of the main file. None for a
-     * change of an environment's file, and never the file of Grav's CLI default environment "cli".
+     * change of an environment's file, and never the file of Grav's CLI default environment "cli" (cliFolder()).
      *
      * @param string $file The changed file
      * @param array $values Key => value
@@ -314,10 +195,9 @@ class Settings
             return [];
         }
 
-        $cli = $this->cliDefault() ? $this->grav['locator']->findResource('environment://', true) : false;
         $overrides = [];
         foreach ($this->files() as $other) {
-            if ($other === $file || ($cli && strpos($other, $cli . '/') === 0)) {
+            if ($other === $file || $this->cliFolder(dirname($other, 3))) {
                 continue;
             }
             foreach ($values as $key => $value) {
@@ -332,18 +212,21 @@ class Settings
     }
 
     /**
-     * The config files in which a setting is still on as Grav reads them: the main one (also if only the plugin's
-     * default turns it on) and those of the environments that turn it on.
+     * The config files in which a setting is still on: the main one (also if only the plugin's default turns it on)
+     * and those of the environments that turn it on, except Grav's CLI default environment "cli" (cliFolder()). Read
+     * from the files as they are now, not as this command read or saved them, so it also tells a change that didn't
+     * reach its file.
      *
      * @param string $key
      * @return string[]
      */
     public function stillOn(string $key): array
     {
+        $this->files = null;
         $main = $this->mainFile();
-        $on = $this->mainValue($key) ? [Folder::getRelativePath($main)] : [];
+        $on = ($this->onDisk($main, $key) ?? Utils::getDotNotation($this->defaults(), $key)) ? [Folder::getRelativePath($main)] : [];
         foreach ($this->files() as $file) {
-            if ($file !== $main && $this->read($file, $key)) {
+            if ($file !== $main && !$this->cliFolder(dirname($file, 3)) && $this->onDisk($file, $key)) {
                 $on[] = Folder::getRelativePath($file);
             }
         }
@@ -352,15 +235,42 @@ class Settings
     }
 
     /**
-     * A setting in one config file, null if it isn't set there.
+     * A setting in one config file as the file has it now (read() keeps what this command read or saved), null if it
+     * isn't set there or the file can't be read.
      *
      * @param string $file
      * @param string $key
      * @return mixed
      */
-    public function read(string $file, string $key)
+    protected function onDisk(string $file, string $key)
     {
-        return Utils::getDotNotation($this->content($file), $key);
+        clearstatcache(true, $file);
+        $yaml = is_file($file) ? @file_get_contents($file) : false;
+        if ($yaml === false) {
+            return null;
+        }
+        try {
+            return Utils::getDotNotation((array)Yaml::parse($yaml), $key);
+        } catch (\Throwable $e) {
+            // Grav can't read it either.
+            return null;
+        }
+    }
+
+    /**
+     * The GRAV_CONFIG__ environment variable that turns a setting of this plugin on, or off, above every config file,
+     * in every environment (environmentOverrides()): no change of a config file changes that. Null if none does.
+     *
+     * @param string $key E.g. "admin.enforce_oauth2"
+     * @param bool $on Whether it's asked for one that turns it on, else off
+     * @return string|null The variable's name
+     */
+    public function overriding(string $key, bool $on): ?string
+    {
+        $path = 'plugins.login-oauth2.' . $key;
+        $variable = $this->environmentOverride($path);
+
+        return $variable !== null && (bool)$this->overrideValues[$path] === $on ? $variable : null;
     }
 
     /**
@@ -380,18 +290,25 @@ class Settings
      * file that it already gets from below (the main file from the plugin's default, an environment's file from the
      * main configuration) is left out. Grav saves the file as YAML again, without comments (as the admin does). Grav's
      * compiled configuration is removed, so the next request reads the file again (Grav only checks for changed config
-     * files every few seconds). The configuration of this command gets the values too.
+     * files every few seconds). The configuration of this command gets the values too, except where a GRAV_CONFIG__
+     * variable overrides them (environmentOverrides()), as in Grav.
      *
      * @param string $file
-     * @param array $values Key => value
+     * @param array<string, mixed> $values Key => value
      * @param string $what For the log, e.g. "turned Enforce OAuth2 off"
+     * @param string[]|null $changed The keys it changed
      * @return string|null The change ("<file>: <keys>"), null if nothing changed
+     * @throws RuntimeException For a file that can't be read (unreadable())
      */
-    public function save(string $file, array $values, string $what): ?string
+    public function save(string $file, array $values, string $what, ?array &$changed = null): ?string
     {
-        $content = $this->content($file);
-        $main = $file === $this->mainFile();
         $changed = [];
+        $content = $this->content($file);
+        // Saving would replace it with these settings alone.
+        if (isset($this->unreadable[$file])) {
+            throw new RuntimeException(sprintf("Can't read %s, so it wasn't changed: %s", Folder::getRelativePath($file), $this->unreadable[$file]));
+        }
+        $main = $file === $this->mainFile();
         foreach ($values as $key => $value) {
             $previous = Utils::getDotNotation($content, $key);
             $inherited = $main ? Utils::getDotNotation($this->defaults(), $key) : $this->mainValue($key);
@@ -399,7 +316,9 @@ class Settings
                 continue;
             }
             Utils::setDotNotation($content, $key, $value);
-            $this->grav['config']->set('plugins.login-oauth2.' . $key, $value);
+            if ($this->environmentOverride('plugins.login-oauth2.' . $key) === null) {
+                $this->grav['config']->set('plugins.login-oauth2.' . $key, $value);
+            }
             $changed[] = $key;
         }
         if (!$changed) {
@@ -409,7 +328,7 @@ class Settings
         $yaml = CompiledYamlFile::instance($file);
         $yaml->save($content);
         $yaml->free();
-        $this->contents[$file] = $content;
+        $this->replace($file, $content);
         $this->files = null;
         $compiled = $this->grav['locator']->findResource('cache://compiled/config', true, true);
         foreach (is_dir($compiled) ? scandir($compiled) : [] as $name) {
@@ -438,31 +357,6 @@ class Settings
     }
 
     /**
-     * The providers a side's login gets, also the ones of satellite plugins that aren't configured yet: this plugin's
-     * from the current settings, and the ones satellite plugins add on onOAuth2ProvidersRegister (as for the Admin2
-     * login, LoginOauth2Plugin::ensureAdminOAuth2()). For the site also the ones they add to the site's service in their
-     * own onPluginsInitialized (e.g. login-oauth2-extras before 2.2.2), as its login page shows them.
-     *
-     * @param string $side
-     * @return array Name => settings
-     */
-    public function registeredProviders(string $side): array
-    {
-        $providers = OAuth2::registered($side === 'admin')->getProviders();
-
-        if ($side === 'site' && isset($this->grav['oauth2']) && !$this->grav['oauth2']->isAdmin()) {
-            foreach ($this->grav['oauth2']->getProviders() as $name => $options) {
-                // This plugin's from the current settings only (changed by this command, or without "cli").
-                if (!in_array($name, $this->providers(), true)) {
-                    $providers += [$name => $options];
-                }
-            }
-        }
-
-        return $providers;
-    }
-
-    /**
      * Why "Enforce OAuth2" doesn't apply on a side although it's on, null if it applies: the plugin's rule
      * (OAuth2::enforceNotApplying()), in words.
      *
@@ -473,94 +367,25 @@ class Settings
     public function notApplying(string $side, ?array $providers = null): ?string
     {
         $config = (array)($this->grav['config']->get('plugins.login-oauth2') ?? []);
-        $why = OAuth2::enforceNotApplying($side === 'admin', $config, $providers ?? $this->registeredProviders($side));
 
-        return $why === null ? null : [
-            'disabled' => 'the plugin is disabled',
-            'admin_disabled' => "'Enabled in Admin' is off",
-            'no_provider' => 'no active provider',
-        ][$why];
-    }
-
-    /**
-     * The settings "Enforce OAuth2" on a side requires off (OAuth2::enforceRequirements()), in every configuration a
-     * change of it reaches (contexts()), not the one of this command: name => where it's on (contextValue(); empty:
-     * off everywhere).
-     *
-     * @param string $side
-     * @return array<string, string[]>
-     */
-    public function requirements(string $side): array
-    {
-        $on = [];
-        foreach ($this->contexts($side) as $folder) {
-            $where = [];
-            $get = function (string $path) use ($folder, &$where) {
-                [$value, $where[$path]] = $this->contextValue($folder, $path);
-
-                return $value;
-            };
-            foreach (OAuth2::enforceRequirements($side === 'admin', $get) as $requirement => $met) {
-                $on[$requirement] = $on[$requirement] ?? [];
-                if (!$met) {
-                    // Read while checking it: the setting that turns it on.
-                    $file = $where[OAuth2::REQUIREMENT_KEYS[$requirement]];
-                    $on[$requirement][$file] = $file;
-                }
-            }
-        }
-
-        $requirements = [];
-        foreach ($on as $requirement => $files) {
-            $requirements[OAuth2::requirementNames([$requirement])] = array_values($files);
-        }
-
-        return $requirements;
+        return static::whyNotApplying($side, $config, $providers ?? $this->registeredProviders($side));
     }
 
     /**
      * The state of a requirement (requirements()) for the commands: "off", or where it's on and why it must be off.
      *
-     * @param string[] $where Where it's on (requirements())
-     * @param bool $enforced Whether "Enforce OAuth2" is on
+     * @param array<string, bool> $where Where it's on => whether "Enforce OAuth2" is on there (requirements())
      * @return string
      */
-    public static function requirementState(array $where, bool $enforced): string
+    public static function requirementState(array $where): string
     {
         if (!$where) {
             return 'off';
         }
 
-        return sprintf('%s (%s), must be off%s', $enforced ? '<error>on</error>' : 'on', implode(', ', $where), $enforced ? ': users can still log in without OAuth2' : ' to turn it on');
-    }
+        $enforced = in_array(true, $where, true);
 
-    /**
-     * The settings "Enforce OAuth2" on a side requires off that are on somewhere (requirements()), in words with the
-     * files that turn them on ("A (file) and B (file)"); null if none.
-     *
-     * @param string $side
-     * @return string|null
-     */
-    public function unmetRequirements(string $side): ?string
-    {
-        $unmet = [];
-        foreach ($this->requirements($side) as $name => $where) {
-            if ($where) {
-                $unmet[] = $name . ' (' . implode(', ', $where) . ')';
-            }
-        }
-
-        return $unmet ? OAuth2::andList($unmet) : null;
-    }
-
-    /**
-     * This plugin's providers (the ones its default configuration has).
-     *
-     * @return string[]
-     */
-    public function providers(): array
-    {
-        return array_keys((array)($this->defaults()['providers'] ?? []));
+        return sprintf('%s (%s): %s', $enforced ? '<error>on</error>' : 'on', implode(', ', array_keys($where)), $enforced ? 'users can still log in without OAuth2' : 'turn it off first');
     }
 
     /**
@@ -603,51 +428,9 @@ class Settings
     }
 
     /**
-     * @return array
-     */
-    protected function defaults(): array
-    {
-        return $this->pluginDefaults('login-oauth2');
-    }
-
-    /**
-     * A plugin's default configuration, empty if it isn't installed.
-     *
-     * @param string $plugin
-     * @return array<string, mixed>
-     */
-    protected function pluginDefaults(string $plugin): array
-    {
-        if (!isset($this->defaults[$plugin])) {
-            $file = $this->grav['locator']->findResource("plugins://{$plugin}/{$plugin}.yaml");
-            $this->defaults[$plugin] = is_string($file) ? $this->content($file) : [];
-        }
-
-        return $this->defaults[$plugin];
-    }
-
-    /**
-     * @param string $file
-     * @return array
-     */
-    protected function content(string $file): array
-    {
-        if (!isset($this->contents[$file])) {
-            $content = [];
-            if (is_file($file)) {
-                $yaml = CompiledYamlFile::instance($file);
-                $content = (array)$yaml->content();
-                $yaml->free();
-            }
-            $this->contents[$file] = $content;
-        }
-
-        return $this->contents[$file];
-    }
-
-    /**
-     * Whether Grav runs in its CLI default environment "cli", which web requests don't use: no environment chosen by
-     * --env, GRAV_ENVIRONMENT, GRAV_ENVIRONMENT_PATH (a folder all requests use) or setup.php ("environment").
+     * Whether Grav runs in its CLI default environment "cli", which web requests don't use: a command with no
+     * environment chosen by --env, GRAV_ENVIRONMENT, GRAV_ENVIRONMENT_PATH (a folder all requests use) or setup.php
+     * ("environment").
      *
      * @return bool
      */
@@ -670,51 +453,15 @@ class Settings
             return;
         }
 
-        // As Grav loads it: the main config file, completed with the plugin's defaults.
-        $file = $this->mainFile();
+        // As Grav loads it: the main config file, completed with the plugin's defaults, then the GRAV_CONFIG__
+        // variables.
         $config = $this->grav['config'];
-        $config->set('plugins.login-oauth2', $this->content($file));
+        $overrides = $this->pluginOverrides();
+        $config->set('plugins.login-oauth2', $this->content($this->mainFile()));
         $config->joinDefaults('plugins.login-oauth2', $this->defaults());
-    }
-
-    /**
-     * A folder Grav takes from GRAV_ENVIRONMENT_PATH or GRAV_ENVIRONMENTS_PATH: a stream (e.g. user://), an absolute
-     * path, or a path relative to Grav's folder. Null for a stream without a folder.
-     *
-     * @param string $path
-     * @return string|null
-     */
-    protected function path(string $path): ?string
-    {
-        $locator = $this->grav['locator'];
-        // Before trimming: "user://" without its slashes is no stream.
-        if ($locator->isStream($path)) {
-            $folder = $locator->findResource($path, true, true);
-
-            return $folder ? rtrim($folder, '/\\') : null;
+        foreach ($overrides as $key => $value) {
+            $config->set('plugins.login-oauth2.' . $key, $value);
         }
-
-        $path = rtrim($path, '/\\');
-
-        return preg_match('`^/|\w+:`', $path) ? $path : $locator->getBase() . '/' . $path;
-    }
-
-    /**
-     * The folders in a folder (no glob(), which reads characters such as "[" in the path as a pattern).
-     *
-     * @param string|null $root
-     * @return string[]
-     */
-    protected static function folders(?string $root): array
-    {
-        $folders = [];
-        foreach ($root && is_dir($root) ? scandir($root) : [] as $name) {
-            if ($name[0] !== '.' && is_dir($root . '/' . $name)) {
-                $folders[] = $root . '/' . $name;
-            }
-        }
-
-        return $folders;
     }
 
     /**
@@ -732,25 +479,5 @@ class Settings
 
         // E.g. a string that isn't valid UTF-8.
         return $json !== false ? $json : var_export($value, true);
-    }
-
-    /**
-     * A setting Grav reads from a constant or the environment variables, e.g. GRAV_ENVIRONMENTS_PATH (as Setup does).
-     *
-     * @param string $name
-     * @return string|null
-     */
-    protected static function setting(string $name): ?string
-    {
-        if (defined($name)) {
-            return (string)constant($name);
-        }
-        foreach ([$_SERVER[$name] ?? null, $_ENV[$name] ?? null, getenv($name)] as $value) {
-            if (is_string($value) && $value !== '') {
-                return $value;
-            }
-        }
-
-        return null;
     }
 }

@@ -55,108 +55,6 @@ form:
               text: PLUGIN_LOGIN_OAUTH2.SECTION_CALLBACKS_DESC
               underline: true
 
-            callback_provider:
-              type: select
-              label: PLUGIN_LOGIN_OAUTH2.CALLBACK_PROVIDER
-              help: PLUGIN_LOGIN_OAUTH2.CALLBACK_PROVIDER_HELP
-              data-default@: ['Grav\Plugin\Login\OAuth2\OAuth2::callbackProvider']
-              options:
-                generic: Generic
-                github: GitHub
-                instagram: Instagram
-                facebook: Facebook
-                google: Google
-                linkedin: LinkedIn
-              validate:
-                ignore: true
-
-            # Until a provider is selected: the select then shows its default, but has no value yet (' ' compares as
-            # empty, as Admin2 trims the compared value).
-            admin_callback_default:
-              type: conditional
-              condition: "callback_provider == ' '"
-              fields:
-                admin_callback_url_default:
-                  type: text
-                  disabled: true
-                  copy_to_clipboard: true
-                  label: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI
-                  help: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI_HELP
-                  data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getAdminCallbackUri']
-
-            admin_callback_generic:
-              type: conditional
-              condition: "callback_provider == generic"
-              fields:
-                admin_callback_url_generic:
-                  type: text
-                  disabled: true
-                  copy_to_clipboard: true
-                  label: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI
-                  help: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI_HELP
-                  data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getAdminCallbackUri', 'generic']
-
-            admin_callback_github:
-              type: conditional
-              condition: "callback_provider == github"
-              fields:
-                admin_callback_url_github:
-                  type: text
-                  disabled: true
-                  copy_to_clipboard: true
-                  label: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI
-                  help: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI_HELP
-                  data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getAdminCallbackUri', 'github']
-
-            admin_callback_instagram:
-              type: conditional
-              condition: "callback_provider == instagram"
-              fields:
-                admin_callback_url_instagram:
-                  type: text
-                  disabled: true
-                  copy_to_clipboard: true
-                  label: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI
-                  help: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI_HELP
-                  data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getAdminCallbackUri', 'instagram']
-
-            admin_callback_facebook:
-              type: conditional
-              condition: "callback_provider == facebook"
-              fields:
-                admin_callback_url_facebook:
-                  type: text
-                  disabled: true
-                  copy_to_clipboard: true
-                  label: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI
-                  help: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI_HELP
-                  data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getAdminCallbackUri', 'facebook']
-
-            admin_callback_google:
-              type: conditional
-              condition: "callback_provider == google"
-              fields:
-                admin_callback_url_google:
-                  type: text
-                  disabled: true
-                  copy_to_clipboard: true
-                  label: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI
-                  help: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI_HELP
-                  data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getAdminCallbackUri', 'google']
-
-            admin_callback_linkedin:
-              type: conditional
-              condition: "callback_provider == linkedin"
-              fields:
-                admin_callback_url_linkedin:
-                  type: text
-                  disabled: true
-                  copy_to_clipboard: true
-                  label: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI
-                  help: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI_HELP
-                  data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getAdminCallbackUri', 'linkedin']
-
-            # Last, after the conditionals: hidden ones still take spacing in Admin2, which would leave a gap at the end.
             site_callback_url:
               type: text
               disabled: true
@@ -164,6 +62,14 @@ form:
               label: PLUGIN_LOGIN_OAUTH2.SITE_CALLBACK_URI
               help: PLUGIN_LOGIN_OAUTH2.SITE_CALLBACK_URI_HELP
               data-default@: ['Grav\Plugin\Login\OAuth2\Providers\BaseProvider::getCallbackUri', '']
+
+            # Admin2 logins return to the API plugin, with one URI per provider: all are listed. Classic admin logins
+            # return to the admin's route, one URI for all (OAuth2::adminCallbackUris()).
+            admin_callback_urls:
+              type: display
+              label: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI
+              help: PLUGIN_LOGIN_OAUTH2.ADMIN_CALLBACK_URI_HELP
+              data-content@: ['Grav\Plugin\Login\OAuth2\OAuth2::adminCallbackUris']
 
             users_section:
               type: section
@@ -250,23 +156,11 @@ form:
               validate:
                 type: bool
 
-            # Admin2 shows it while the toggle is on in the form: the requirements and whether it applies
-            # (OAuth2::enforceConditionsNotice()). The classic admin evaluates the condition without the form's values
-            # and doesn't show it; it shows the notice below instead.
+            # The settings it requires off with their state, and whether it applies (OAuth2::enforceConditionsNotice()).
             enforce_oauth2_conditions:
-              type: conditional
-              condition: enforce_oauth2
-              fields:
-                enforce_oauth2_conditions_notice:
-                  type: display
-                  style: vertical
-                  data-content@: ['Grav\Plugin\Login\OAuth2\OAuth2::enforceConditionsNotice', false]
-
-            # Classic admin: while it's on but doesn't apply (OAuth2::enforceNotice()); without content nothing shows.
-            enforce_oauth2_notice:
               type: display
               style: vertical
-              data-content@: ['Grav\Plugin\Login\OAuth2\OAuth2::enforceNotice', false]
+              data-content@: ['Grav\Plugin\Login\OAuth2\OAuth2::enforceConditionsNotice', false]
 
             site_users_section:
               type: section
@@ -359,23 +253,11 @@ form:
               validate:
                 type: bool
 
-            # Admin2 shows it while the toggle is on in the form: the requirements and whether it applies
-            # (OAuth2::enforceConditionsNotice()). The classic admin evaluates the condition without the form's values
-            # and doesn't show it; it shows the notice below instead.
+            # The settings it requires off with their state, and whether it applies (OAuth2::enforceConditionsNotice()).
             admin_enforce_oauth2_conditions:
-              type: conditional
-              condition: admin.enforce_oauth2
-              fields:
-                admin_enforce_oauth2_conditions_notice:
-                  type: display
-                  style: vertical
-                  data-content@: ['Grav\Plugin\Login\OAuth2\OAuth2::enforceConditionsNotice', true]
-
-            # Classic admin: while it's on but doesn't apply (OAuth2::enforceNotice()); without content nothing shows.
-            admin_enforce_oauth2_notice:
               type: display
               style: vertical
-              data-content@: ['Grav\Plugin\Login\OAuth2\OAuth2::enforceNotice', true]
+              data-content@: ['Grav\Plugin\Login\OAuth2\OAuth2::enforceConditionsNotice', true]
 
             admin_users_section:
               type: section

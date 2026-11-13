@@ -2,18 +2,18 @@
 
 namespace Grav\Plugin\Console;
 
-use Grav\Common\Grav;
-use Grav\Console\ConsoleCommand;
 use Grav\Plugin\Login\OAuth2\Console\Settings;
+use Grav\Plugin\Login\OAuth2\Console\SettingsCommand;
 use Symfony\Component\Console\Input\InputArgument;
-use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Style\SymfonyStyle;
-use Throwable;
+
+// The plugin's classes, also while the plugin isn't loaded.
+require_once __DIR__ . '/../vendor/autoload.php';
 
 /**
  * bin/plugin login-oauth2 provider enable|disable <name>, provider verify-certificate <name> [on|off|status].
  */
-class OAuth2ProviderCommand extends ConsoleCommand
+class OAuth2ProviderCommand extends SettingsCommand
 {
     protected function configure()
     {
@@ -22,40 +22,27 @@ class OAuth2ProviderCommand extends ConsoleCommand
             ->addArgument('action', InputArgument::REQUIRED, 'enable, disable or verify-certificate')
             ->addArgument('name', InputArgument::REQUIRED, 'The provider, e.g. generic')
             ->addArgument('value', InputArgument::OPTIONAL, 'For verify-certificate: on, off or status (the default)')
-            ->addOption('site', null, InputOption::VALUE_NONE, 'Only the site')
-            ->addOption('admin', null, InputOption::VALUE_NONE, 'Only the admin')
+            ->addSideOptions()
             ->setDescription('Enables or disables a provider, or changes its settings')
             ->setHelp(
-                "The <info>provider</info> command changes one of this plugin's providers, for the site and the admin.\n\n" .
+                "<info>provider</info> changes one of this plugin's providers, for the site and the admin.\n\n" .
                 "  <info>bin/plugin login-oauth2 provider enable generic</info>\n" .
                 "  <info>bin/plugin login-oauth2 provider disable github --admin</info>\n" .
                 "  <info>bin/plugin login-oauth2 provider verify-certificate generic off --site</info>   only for testing\n" .
                 "  <info>bin/plugin login-oauth2 provider verify-certificate generic</info>             shows it\n\n" .
-                "verify-certificate works for providers that have the 'Verify Certificate' setting (Generic). Providers of other\n" .
-                "plugins (e.g. login-oauth2-extras) are set in their own plugin's settings."
+                "verify-certificate is for providers with a 'Verify Certificate' setting (Generic). Providers of other plugins\n" .
+                "(e.g. login-oauth2-extras) are changed in their own plugin's settings."
             );
     }
 
     protected function serve()
     {
-        include __DIR__ . '/../vendor/autoload.php';
-
         $io = new SymfonyStyle($this->input, $this->output);
-        // With the plugins: satellite plugins (e.g. login-oauth2-extras) add their providers.
-        try {
-            $this->initializePlugins();
-        } catch (Throwable $e) {
-            $this->initializeGrav();
-            $io->warning('The plugins could not be initialized, providers of other plugins are missing: ' . $e->getMessage());
-        }
-
-        $settings = new Settings(Grav::instance(), $this->input);
-        $sides = Settings::sides($this->input);
-        if ($error = $settings->missingEnvironment($this->input)) {
-            $io->error($error);
-
+        $settings = $this->settings($io);
+        if (!$settings) {
             return 1;
         }
+        $sides = Settings::sides($this->input);
         $action = strtolower((string)$this->input->getArgument('action'));
         $name = strtolower((string)$this->input->getArgument('name'));
 
@@ -63,7 +50,7 @@ class OAuth2ProviderCommand extends ConsoleCommand
         if (!in_array($name, $providers, true)) {
             $io->error([
                 "Unknown provider '{$name}'. This plugin's providers: " . implode(', ', $providers) . '.',
-                "Providers of other plugins (e.g. login-oauth2-extras) are set in their own plugin's settings.",
+                "Providers of other plugins (e.g. login-oauth2-extras) are changed in their own plugin's settings.",
             ]);
 
             return 1;
@@ -72,7 +59,7 @@ class OAuth2ProviderCommand extends ConsoleCommand
         $value = $this->input->getArgument('value');
         if ($action === 'enable' || $action === 'disable') {
             if ($value !== null) {
-                $io->error("Too many arguments: '{$action}' takes one provider, '{$value}' wasn't expected. Nothing changed.");
+                $io->error("Too many arguments: '{$action}' takes one provider name, not '{$value}'. Nothing changed.");
 
                 return 1;
             }
@@ -94,8 +81,13 @@ class OAuth2ProviderCommand extends ConsoleCommand
     protected function enable(SymfonyStyle $io, Settings $settings, array $sides, string $name, bool $enable): int
     {
         $values = [];
+        // Sides where "Enforce OAuth2" is on without applying: a provider enabled there can make it apply.
+        $dormant = [];
         foreach ($sides as $side) {
             $values[Settings::key($side, "providers.{$name}.enabled")] = $enable;
+            if ($enable && $settings->get(Settings::key($side, 'enforce_oauth2')) && $settings->notApplying($side) !== null) {
+                $dormant[] = $side;
+            }
         }
 
         $state = $enable ? 'enabled' : 'disabled';
@@ -119,7 +111,13 @@ class OAuth2ProviderCommand extends ConsoleCommand
                 $io->note("Admin: 'Enabled in Admin' is off, so the admin login doesn't offer it yet.");
             }
             if (!$enable && !$active && $settings->get(Settings::key($side, 'enforce_oauth2'))) {
-                $io->note(ucfirst($side) . ": no active provider left, so 'Enforce OAuth2' doesn't apply anymore.");
+                $io->note(ucfirst($side) . ": no active provider is left, so 'Enforce OAuth2' no longer applies.");
+            }
+            // It was turned on before (e.g. with --force) and waited for a provider: from now on it denies the other logins.
+            if (in_array($side, $dormant, true) && $settings->notApplying($side) === null) {
+                $requirements = $settings->unmetRequirements($side);
+                $io->warning(ucfirst($side) . ": 'Enforce OAuth2' is on and applies now that the side has an active provider: only OAuth2 logins work."
+                    . ($requirements ? " Users can still log in without OAuth2 until you turn off {$requirements}." : ''));
             }
         }
 
@@ -172,21 +170,9 @@ class OAuth2ProviderCommand extends ConsoleCommand
         $io->success(sprintf("'Verify Certificate' of '%s' is %s (%s).", $name, $value, implode(', ', $sides)));
         $this->overrides($io, $settings, $file, $values);
         if ($value === 'off') {
-            $io->warning('Only for testing: without the check, anyone who can intercept the connection to the provider can read the client secret and tokens, and log in as any user.');
+            $io->warning('For testing only: without this check, anyone who can intercept the connection to the provider can read the client secret and tokens, and log in as any user.');
         }
 
         return 0;
-    }
-
-    /**
-     * Warns about the environments whose config files override a change of the main file.
-     *
-     * @param array $values Key => value
-     */
-    protected function overrides(SymfonyStyle $io, Settings $settings, string $file, array $values): void
-    {
-        if ($overrides = $settings->overrides($file, $values)) {
-            $io->warning(array_merge(['These environments override it (change them with --env=<environment>):'], $overrides));
-        }
     }
 }
